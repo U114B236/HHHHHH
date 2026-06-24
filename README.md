@@ -1,2 +1,321 @@
-# HHHHHH
-賽博朋克：無限殺怪生存戰
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cyber Survival: 賽博魔物生存戰</title>
+<style>
+    body { margin: 0; overflow: hidden; background: #0a0014; font-family: 'Segoe UI', sans-serif; user-select: none; }
+    #crosshair { position: absolute; top: 50%; left: 50%; width: 26px; height: 26px; transform: translate(-50%, -50%); pointer-events: none; z-index: 5; }
+    #crosshair::before, #crosshair::after { content: ''; position: absolute; background: #00ffff; box-shadow: 0 0 10px #00ffff; }
+    #crosshair::before { top: 11px; left: -18px; width: 62px; height: 3px; }
+    #crosshair::after { top: -18px; left: 11px; width: 3px; height: 62px; }
+    #ui { position: absolute; top: 20px; left: 20px; color: #fff; font-size: 18px; pointer-events: none; z-index: 10; text-shadow: 0 2px 8px #000; }
+    .stat { margin-bottom: 10px; display: flex; align-items: center; }
+    #hp-bar-container { width: 260px; height: 22px; background: rgba(255,255,255,0.1); border: 2px solid #ff0066; border-radius: 999px; overflow: hidden; margin-left: 10px; }
+    #hp-bar { width: 100%; height: 100%; background: linear-gradient(90deg, #ff0066, #ff44aa); transition: width 0.2s; }
+    #controls-hint {
+        position: absolute; bottom: 25px; left: 25px;
+        color: #00ffff; font-size: 15px; background: rgba(0,0,0,0.6);
+        padding: 12px 18px; border-radius: 8px; z-index: 10;
+        text-shadow: 0 0 8px #00ffff; line-height: 1.6;
+        border: 1px solid rgba(0,255,255,0.3);
+    }
+    #menu {
+        position: absolute; inset: 0; background: rgba(10,0,20,0.98); backdrop-filter: blur(15px);
+        color: #fff; display: flex; flex-direction: column; justify-content: center; align-items: center;
+        z-index: 100; text-align: center;
+    }
+    h1 { font-size: 56px; margin: 0; color: #00ffff; text-shadow: 0 0 30px #00ffff; }
+    .btn {
+        margin-top: 30px; padding: 18px 80px; font-size: 28px; font-weight: bold;
+        background: linear-gradient(45deg, #ff00aa, #00ffff); border: none;
+        border-radius: 50px; color: white; cursor: pointer; box-shadow: 0 0 40px rgba(0,255,255,0.7);
+    }
+    .btn:hover { transform: scale(1.1); }
+</style>
+</head>
+<body>
+<div id="ui">
+    <div class="stat">血量 HP: <div id="hp-bar-container"><div id="hp-bar"></div></div></div>
+    <div class="stat">分數 SCORE: <span id="score">0</span></div>
+    <div class="stat">武器等級 LV: <span id="level">1</span></div>
+</div>
+<div id="controls-hint">
+    W → 後退<br>
+    S → 前進<br>
+    A → 向左<br>
+    D → 向右
+</div>
+<div id="menu">
+    <h1 id="menu-title">賽博魔物生存戰</h1>
+    <p id="menu-desc">敵人從迷霧中湧出，撐越久越強</p>
+    <button class="btn" id="start-btn">進入戰場</button>
+</div>
+<div id="crosshair"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.134.0/examples/js/controls/PointerLockControls.js"></script>
+<script>
+// ==================== 音效 ====================
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+function playShootSound() {
+    const osc = audioCtx.createOscillator(); osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(1400, audioCtx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(500, audioCtx.currentTime + 0.12);
+    const gain = audioCtx.createGain(); gain.gain.setValueAtTime(0.35, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.18);
+    osc.connect(gain).connect(audioCtx.destination); osc.start(); osc.stop(audioCtx.currentTime + 0.2);
+}
+
+function playMonsterDeathSound() {
+    const noise = audioCtx.createBufferSource();
+    const buffer = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.4, audioCtx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < buffer.length; i++) data[i] = Math.random() * 2 - 1;
+    noise.buffer = buffer;
+    const filter = audioCtx.createBiquadFilter(); filter.type = 'lowpass'; filter.frequency.value = 600;
+    const gain = audioCtx.createGain(); gain.gain.value = 1.0;
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.6);
+    noise.connect(filter).connect(gain).connect(audioCtx.destination); noise.start();
+}
+
+function playPlayerDeathSound() { /* ... */ }
+function playHitSound() { /* ... */ }
+function playHurtSound() { /* ... */ }
+
+// ==================== 變數 ====================
+let scene, camera, renderer, controls;
+let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false;
+let isShooting = false, isGameOver = false;
+let prevTime = performance.now();
+const velocity = new THREE.Vector3();
+let playerHp = 100, playerScore = 0, weaponLevel = 1;
+let lastShotTime = 0, lastSpawnTime = 0, shakeIntensity = 0;
+
+const enemies = [], bullets = [], particles = [];
+
+const gunSettings = {
+    1: { cooldown: 210, speed: 240, size: 0.23, color: 0x00ffff, damage: 15 },
+    2: { cooldown: 135, speed: 270, size: 0.27, color: 0x00ffaa, damage: 22 },
+    3: { cooldown: 80, speed: 310, size: 0.31, color: 0xffff00, damage: 30 },
+    4: { cooldown: 45, speed: 350, size: 0.36, color: 0xff0088, damage: 45 }
+};
+
+const menu = document.getElementById('menu');
+const startBtn = document.getElementById('start-btn');
+const hpBar = document.getElementById('hp-bar');
+const scoreUi = document.getElementById('score');
+const levelUi = document.getElementById('level');
+const menuTitle = document.getElementById('menu-title');
+const menuDesc = document.getElementById('menu-desc');
+
+// ==================== 初始化 ====================
+function init() {
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x1a0022);
+    scene.fog = new THREE.FogExp2(0x2a0033, 0.04);
+
+    camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 250);
+    camera.position.y = 2;
+
+    controls = new THREE.PointerLockControls(camera, document.body);
+    controls.addEventListener('lock', () => menu.style.display = 'none');
+    controls.addEventListener('unlock', () => { if (isGameOver) menu.style.display = 'flex'; });
+    scene.add(controls.getObject());
+
+    scene.add(new THREE.AmbientLight(0xff88cc, 0.6));
+    const dirLight = new THREE.DirectionalLight(0x88aaff, 0.9);
+    dirLight.position.set(15, 40, 25);
+    scene.add(dirLight);
+
+    const floor = new THREE.Mesh(new THREE.PlaneGeometry(200, 200), new THREE.MeshStandardMaterial({ color: 0x110022, roughness: 0.9 }));
+    floor.rotation.x = -Math.PI / 2;
+    scene.add(floor);
+
+    // 鍵盤控制
+    document.addEventListener('keydown', e => {
+        if(e.code === 'KeyW') moveForward = true;
+        if(e.code === 'KeyS') moveBackward = true;
+        if(e.code === 'KeyA') moveLeft = true;
+        if(e.code === 'KeyD') moveRight = true;
+    });
+    document.addEventListener('keyup', e => {
+        if(e.code === 'KeyW') moveForward = false;
+        if(e.code === 'KeyS') moveBackward = false;
+        if(e.code === 'KeyA') moveLeft = false;
+        if(e.code === 'KeyD') moveRight = false;
+    });
+
+    document.addEventListener('mousedown', () => isShooting = true);
+    document.addEventListener('mouseup', () => isShooting = false);
+
+    window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    startBtn.addEventListener('click', () => {
+        if (isGameOver) location.reload();
+        else controls.lock();
+    });
+
+    // 初始顯示選單
+    menu.style.display = 'flex';
+}
+
+function createEnemy() {
+    const enemy = new THREE.Mesh(new THREE.BoxGeometry(2.2, 2.2, 2.2), new THREE.MeshStandardMaterial({ color: 0x9900ff, emissive: 0x550077 }));
+    const p = controls.getObject().position;
+    const forward = new THREE.Vector3();
+    camera.getWorldDirection(forward);
+    forward.y = 0; forward.normalize();
+
+    const dist = 60;
+    enemy.position.copy(p).addScaledVector(forward, dist);
+    enemy.position.x += (Math.random() - 0.5) * 20;
+    enemy.position.z += (Math.random() - 0.5) * 20;
+
+    enemy.userData = { hp: 30, speed: 4.125 };
+    scene.add(enemy);
+    enemies.push(enemy);
+}
+
+function createDeathExplosion(pos) {
+    playMonsterDeathSound();
+    shakeIntensity = 1.5;
+    for (let i = 0; i < 25; i++) {  // 大幅減少粒子
+        const p = new THREE.Mesh(new THREE.SphereGeometry(0.25, 5, 5), new THREE.MeshBasicMaterial({ color: 0xff44ff }));
+        p.position.copy(pos);
+        p.userData = { vel: new THREE.Vector3((Math.random()-0.5)*25, Math.random()*20+5, (Math.random()-0.5)*25), life: 0.8 + Math.random()*0.4 };
+        scene.add(p);
+        particles.push(p);
+    }
+}
+
+function shoot() {
+    const s = gunSettings[weaponLevel];
+    const bullet = new THREE.Mesh(new THREE.SphereGeometry(s.size, 8, 8), new THREE.MeshBasicMaterial({ color: s.color }));
+    bullet.position.copy(controls.getObject().position);
+    bullet.position.y += 0.6;
+    const dir = new THREE.Vector3();
+    camera.getWorldDirection(dir);
+    bullet.userData = { dir: dir.clone(), speed: s.speed, damage: s.damage };
+    scene.add(bullet);
+    bullets.push(bullet);
+    playShootSound();
+}
+
+function gameOver() {
+    isGameOver = true;
+    playPlayerDeathSound();
+    controls.unlock();
+    menuTitle.textContent = '戰魂熄滅 💀';
+    menuTitle.style.color = '#ff0066';
+    menuDesc.innerHTML = `最終得分：${playerScore}<br>最高武器等級：LV ${weaponLevel}`;
+    startBtn.textContent = '重新開始';
+    menu.style.display = 'flex';
+}
+
+// ==================== 主循環 ====================
+function animate() {
+    requestAnimationFrame(animate);
+    const delta = Math.min((performance.now() - prevTime)/1000, 0.06);
+    prevTime = performance.now();
+
+    if (!controls.isLocked || isGameOver) {
+        renderer.render(scene, camera);
+        return;
+    }
+
+    // 玩家移動（正常宜速）
+    velocity.multiplyScalar(0.88);
+    const moveX = Number(moveRight) - Number(moveLeft);
+    const moveZ = Number(moveBackward) - Number(moveForward);
+    if (moveX || moveZ) {
+        const len = Math.hypot(moveX, moveZ) || 1;
+        velocity.x += (moveX / len) * 12 * delta;
+        velocity.z += (moveZ / len) * 12 * delta;
+    }
+    controls.moveRight(velocity.x * delta * 8);
+    controls.moveForward(velocity.z * delta * 8);
+
+    // 射擊 & 生成
+    if (isShooting && performance.now() - lastShotTime > gunSettings[weaponLevel].cooldown) {
+        shoot(); lastShotTime = performance.now();
+    }
+    if (performance.now() - lastSpawnTime > 800) {  // 降低生成頻率
+        createEnemy(); lastSpawnTime = performance.now();
+    }
+
+    const playerPos = controls.getObject().position;
+
+    // 子彈
+    for (let i = bullets.length-1; i >= 0; i--) {
+        const b = bullets[i];
+        b.position.addScaledVector(b.userData.dir, b.userData.speed * delta);
+        if (b.position.length() > 160) { scene.remove(b); bullets.splice(i,1); }
+    }
+
+    // 敵人
+    for (let i = enemies.length-1; i >= 0; i--) {
+        const e = enemies[i];
+        const toPlayer = new THREE.Vector3().subVectors(playerPos, e.position).normalize();
+        e.position.addScaledVector(toPlayer, e.userData.speed * delta);
+
+        if (e.position.distanceTo(playerPos) < 2.8) {
+            playerHp -= 18;
+            hpBar.style.width = Math.max(0, playerHp) + '%';
+            playHurtSound();
+            if (playerHp <= 0) gameOver();
+            scene.remove(e); enemies.splice(i,1);
+            continue;
+        }
+
+        for (let j = bullets.length-1; j >= 0; j--) {
+            if (bullets[j].position.distanceTo(e.position) < 2.2) {
+                e.userData.hp -= bullets[j].userData.damage;
+                playHitSound();
+                scene.remove(bullets[j]); bullets.splice(j,1);
+                if (e.userData.hp <= 0) {
+                    createDeathExplosion(e.position);
+                    playerScore += 10;
+                    scoreUi.textContent = playerScore;
+                    if (playerScore > weaponLevel * 140) weaponLevel = Math.min(4, weaponLevel + 1);
+                    levelUi.textContent = weaponLevel;
+                    scene.remove(e); enemies.splice(i,1);
+                }
+                break;
+            }
+        }
+    }
+
+    // 粒子
+    for (let i = particles.length-1; i >= 0; i--) {
+        const p = particles[i];
+        p.userData.life -= delta;
+        if (p.userData.life <= 0) { scene.remove(p); particles.splice(i,1); continue; }
+        p.position.addScaledVector(p.userData.vel, delta * 18);
+        p.userData.vel.multiplyScalar(0.93);
+        p.scale.setScalar(p.userData.life);
+    }
+
+    if (shakeIntensity > 0.03) {
+        camera.position.x += (Math.random()-0.5) * shakeIntensity;
+        shakeIntensity *= 0.9;
+    }
+
+    renderer.render(scene, camera);
+}
+
+init();
+animate();
+</script>
+</body>
+</html>
